@@ -1,0 +1,150 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.3.23-2",
+    "lastTouchedAt": "2026-03-26T02:07:25.239Z"
+  },
+  "wizard": {
+    "lastRunAt": "2026-03-19T02:54:15.677Z",
+    "lastRunVersion": "2026.3.13",
+    "lastRunCommand": "onboard",
+    "lastRunMode": "local"
+  },
+  "auth": {
+    "profiles": {
+      "volcengine:default": {
+        "provider": "volcengine",
+        "mode": "api_key"
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "volcengine-plan/ark-code-latest"
+      },
+      "models": {
+        "volcengine-plan/ark-code-latest": {}
+      },
+      "workspace": "/root/.openclaw/workspace",
+      "compaction": {
+        "mode": "safeguard"
+      }
+    },
+    "list": [
+      {
+        "id": "main"
+      },
+      {
+        "id": "freight-bot",
+        "name": "freight-bot",
+        "workspace": "/root/.openclaw/workspace-freight-bot",
+        "agentDir": "/root/.openclaw/agents/freight-bot/agent"
+      }
+    ]
+  },
+  "tools": {
+    "profile": "coding",
+    "web": {
+      "search": {
+        "enabled": true,
+        "provider": "kimi"
+      }
+    }
+  },
+  "bindings": [
+    {
+      "agentId": "freight-bot",
+      "match": {
+        "channel": "wecom",
+        "accountId": "default"
+      }
+    }
+  ],
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "channels": {
+    "wecom": {
+      "enabled": true,
+      "botId": "aibKrSRRkMsu5uajyz5-DJPy5u8LENBR43n",
+      "secret": "ZC2OuJgUnGo6a9WIKL3iTavL6BgO2soFn59hf6Jr5jX",
+      "allowFrom": [],
+      "dmPolicy": "open"
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "22c0bc0c199d82823f2e1195a6738f98822ce4e99b909270"
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    },
+    "nodes": {
+      "denyCommands": [
+        "camera.snap",
+        "camera.clip",
+        "screen.record",
+        "contacts.add",
+        "calendar.add",
+        "reminders.add",
+        "sms.send"
+      ]
+    }
+  },
+  "plugins": {
+    "allow": [
+      "wecom-openclaw-plugin",
+      "openclaw-lark"
+    ],
+    "load": {
+      "paths": []
+    },
+    "entries": {
+      "wecom-openclaw-plugin": {
+        "enabled": true
+      },
+      "openclaw-lark": {
+        "enabled": true
+      }
+    },
+    "installs": {
+      "wecom-openclaw-plugin": {
+        "source": "npm",
+        "spec": "@wecom/wecom-openclaw-plugin",
+        "installPath": "/root/.openclaw/extensions/wecom-openclaw-plugin",
+        "version": "2026.3.24",
+        "resolvedName": "@wecom/wecom-openclaw-plugin",
+        "resolvedVersion": "2026.3.24",
+        "resolvedSpec": "@wecom/wecom-openclaw-plugin@2026.3.24",
+        "integrity": "sha512-OLtuhEPiLnn/nRZAjeBOa3bBN4Vd9pRtHGhPYLluyZ7/W8K2slngCnC0QNcg3UiCf4b9GnXTJ/EQIckfSjW47w==",
+        "shasum": "a3a2e121e6a1e2e64a247f78d058767692ff0e8e",
+        "resolvedAt": "2026-03-25T09:32:53.798Z",
+        "installedAt": "2026-03-25T09:33:02.741Z"
+      },
+      "openclaw-lark": {
+        "source": "npm",
+        "spec": "@larksuite/openclaw-lark",
+        "installPath": "/root/.openclaw/extensions/openclaw-lark",
+        "version": "2026.3.25",
+        "resolvedName": "@larksuite/openclaw-lark",
+        "resolvedVersion": "2026.3.25",
+        "resolvedSpec": "@larksuite/openclaw-lark@2026.3.25",
+        "integrity": "sha512-SkNm0vuBLL58FFIVaDZ4vmdgTYXPfnfAy1vP2h+j0jnw5V+VSTj6IEKUq1oFmfyw7fIztUw/5GaM/quuMuRjog==",
+        "shasum": "f846136f4e37217c9606dbded5168bd5bf0bcfe6",
+        "resolvedAt": "2026-03-25T10:04:37.748Z",
+        "installedAt": "2026-03-25T10:05:41.583Z"
+      }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+server:
+  port: "8080"
+  mode: "release"
+  read_timeout: 30
+  write_timeout: 30
+
+database:
+  host: "your_db_host"
+  port: 3306
+  user: "your_db_user"
+  password: "your_db_password"
+  dbname: "freight_agent"
+  charset: "utf8mb4"
+
+redis:
+  host: "your_redis_host"
+  port: 6379
+  password: "your_redis_password"
+  db: 0
+
+llm:
+  provider: "deepseek"
+  api_key: "your_api_key"
+  base_url: "https://api.deepseek.com/v1"
+  model: "deepseek-chat"
+  timeout: 30
+  max_tokens: 4000
+  temperature: 0.3
+
+wechat:
+  corp_id: ""
+  corp_secret: ""
+  agent_id: 0
+  token: ""
+  encoding_aes_key: ""
+  bot_id: "your_bot_id"
+  bot_secret: "your_bot_secret"

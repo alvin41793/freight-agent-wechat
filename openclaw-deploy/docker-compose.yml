@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  openclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openclaw
+    restart: unless-stopped
+    volumes:
+      # 持久化插件目录（首次启动会自动安装，后续重启跳过）
+      - openclaw_extensions:/root/.openclaw/extensions
+      # 持久化 agent 工作区（对话记录、上下文等）
+      - openclaw_workspace:/root/.openclaw/workspace
+      - openclaw_workspace_freight:/root/.openclaw/workspace-freight-bot
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  openclaw_extensions:
+  openclaw_workspace:
+  openclaw_workspace_freight:
