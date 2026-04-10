@@ -396,6 +396,22 @@ func (ps *PushService) convertToPushPayload(rates []llm.FreightRate) (*PushPaylo
 			missing = append(missing, "ValidityTime")
 		}
 
+		// 检查有效期是否有效（必须 >= 今天）
+		if len(missing) == 0 || missing[len(missing)-1] != "ValidityTime" {
+			todayMs := ps.getTodayStartMs()
+
+			// 如果 ValidityEndTime < 今天，这条数据已过期，跳过
+			if validEndMs < todayMs {
+				skipReasons = append(skipReasons, fmt.Sprintf("index %d: ValidityEndTime(%s) 已过期", i, r.ValidityEndTime))
+				continue
+			}
+
+			// 如果 ValidityStartTime < 今天，修正为今天
+			if validStartMs < todayMs {
+				validStartMs = todayMs
+			}
+		}
+
 		// 检查是否有至少一个箱型价格
 		containerPrice := ps.buildContainerPrice(r)
 		if len(containerPrice) == 0 {
@@ -655,6 +671,13 @@ func (ps *PushService) parseDateToMs(dateStr string) int64 {
 	return 0
 }
 
+// getTodayStartMs 获取今天 00:00:00 的毫秒时间戳
+func (ps *PushService) getTodayStartMs() int64 {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return today.UnixMilli()
+}
+
 // checkIsVia 检查是否中转
 func (ps *PushService) checkIsVia(remark string) int {
 	if strings.Contains(strings.ToLower(remark), "via") {
@@ -712,20 +735,22 @@ func classifyError(errMsg string) PushErrorType {
 }
 
 // parseFailedIndices 从错误消息中解析失败的记录索引
-// 错误消息格式："批量新增异常 第1条数据：...；第3条数据：..."
+// 错误消息格式："批量新增异常 第X条数据：..."
+// 第三方API策略：遇到第一条失败就停止，前面的都成功
 func parseFailedIndices(errMsg string, total int) []int {
 	var failedIndices []int
 
 	// 正则匹配 "第X条数据"
 	re := regexp.MustCompile(`第(\d+)条数据`)
-	matches := re.FindAllStringSubmatch(errMsg, -1)
+	match := re.FindStringSubmatch(errMsg)
 
-	for _, match := range matches {
-		if len(match) >= 2 {
-			if idx, err := strconv.Atoi(match[1]); err == nil {
-				// API 返回的是 1-based 索引，转换为 0-based
-				if idx > 0 && idx <= total {
-					failedIndices = append(failedIndices, idx-1)
+	if len(match) >= 2 {
+		if firstFailedIdx, err := strconv.Atoi(match[1]); err == nil {
+			// API 返回的是 1-based 索引，转换为 0-based
+			// 第X条失败，意味着从第X条到最后一条都失败了
+			if firstFailedIdx > 0 && firstFailedIdx <= total {
+				for i := firstFailedIdx - 1; i < total; i++ {
+					failedIndices = append(failedIndices, i)
 				}
 			}
 		}
@@ -733,6 +758,7 @@ func parseFailedIndices(errMsg string, total int) []int {
 
 	// 如果没有解析到具体索引，默认全部失败
 	if len(failedIndices) == 0 {
+		log.Printf("[push] failed to parse failed indices from error msg: %s, defaulting all %d records as failed", errMsg, total)
 		for i := 0; i < total; i++ {
 			failedIndices = append(failedIndices, i)
 		}

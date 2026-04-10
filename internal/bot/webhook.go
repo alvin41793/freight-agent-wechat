@@ -372,8 +372,8 @@ func (b *Bot) sendRequest(url string, data interface{}) error {
 }
 
 // createMultipartWriter 创建 multipart writer
-func createMultipartWriter(w io.Writer, filename string, data []byte) *multipartWriter {
-	// 简化实现，实际项目中应使用 mime/multipart
+func createMultipartWriter(w io.Writer, _ string, _ []byte) *multipartWriter {
+	// 简化实现,实际项目中应使用 mime/multipart
 	return &multipartWriter{w: w}
 }
 

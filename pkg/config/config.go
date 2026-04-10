@@ -11,12 +11,13 @@ import (
 
 // Config 应用配置
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Database DatabaseConfig `mapstructure:"database"`
-	Redis    RedisConfig    `mapstructure:"redis"`
-	LLM      LLMConfig      `mapstructure:"llm"`
-	WeChat   WeChatConfig   `mapstructure:"wechat"`
-	Push     PushConfig     `mapstructure:"push"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Database  DatabaseConfig  `mapstructure:"database"`
+	Redis     RedisConfig     `mapstructure:"redis"`
+	LLM       LLMConfig       `mapstructure:"llm"`
+	WeChat    WeChatConfig    `mapstructure:"wechat"`
+	Push      PushConfig      `mapstructure:"push"`
+	TextSplit TextSplitConfig `mapstructure:"text_split"`
 }
 
 // ServerConfig 服务器配置
@@ -78,6 +79,14 @@ type PushConfig struct {
 	TokenTTL     int    `mapstructure:"token_ttl"`     // token 有效期(毫秒),默认 60000
 	Timeout      int    `mapstructure:"timeout"`       // HTTP 超时(秒),默认 30
 	MaxRetries   int    `mapstructure:"max_retries"`   // 网络错误最大重试次数,默认 3
+}
+
+// TextSplitConfig 文本分块配置
+type TextSplitConfig struct {
+	MinChunkSize   int `mapstructure:"min_chunk_size"`  // 最小分块阈值（字数），低于此值不分块，默认 800
+	MaxChunkSize   int `mapstructure:"max_chunk_size"`  // 最大分块阈值（字数），超过此值强制分割，默认 1200
+	MaxConcurrency int `mapstructure:"max_concurrency"` // LLM 最大并发数，防止超过 QPS 限制，默认 5
+	MaxChunks      int `mapstructure:"max_chunks"`      // 最大分块数量，超过则合并，默认 20
 }
 
 // DSN 生成数据库连接字符串
@@ -185,4 +194,9 @@ func setDefaults() {
 	viper.SetDefault("llm.timeout", 60)
 	viper.SetDefault("llm.max_tokens", 4000)
 	viper.SetDefault("llm.temperature", 0.3)
+
+	viper.SetDefault("text_split.min_chunk_size", 800)
+	viper.SetDefault("text_split.max_chunk_size", 1200)
+	viper.SetDefault("text_split.max_concurrency", 5)
+	viper.SetDefault("text_split.max_chunks", 20)
 }

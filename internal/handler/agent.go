@@ -7,12 +7,14 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"freight-agent-wechat/internal/llm"
 	"freight-agent-wechat/internal/push"
 	"freight-agent-wechat/internal/session"
 	"freight-agent-wechat/internal/store"
+	"freight-agent-wechat/pkg/config"
 	"freight-agent-wechat/pkg/logger"
 )
 
@@ -164,37 +166,89 @@ func (h *FreightAgentHandler) Handle(ctx context.Context, userID, chatID, text s
 		return "我是运价分析机器人，可以帮您从运价报价文本中提取结构化数据。\n\n请发送包含以下信息的运价文本：\n• 船公司名称（如万海、MSC、COSCO）\n• 起运港 / 目的港\n• 箱型价格（20GP / 40GP / 40HC）\n• 有效期"
 	}
 
-	// ② LLM 运价提取
-	llmStart := time.Now()
-	rates, err := h.llmService.ParseQuoteInput(ctx, text)
-	llmMs := time.Since(llmStart).Milliseconds()
+	// ② 智能分块：长文本按报价块分割
+	chunks := SmartSplitText(text)
 	if h.logger != nil {
-		h.logger.Info("[agent] LLM parse completed: elapsed=%dms rates=%d", llmMs, len(rates))
-	} else {
-		log.Printf("[agent] ParseQuoteInput elapsed=%s", time.Since(llmStart).Round(time.Millisecond))
+		h.logger.Info("[agent] text split into %d chunks", len(chunks))
 	}
-	if err != nil {
+
+	// ③ 限流并发调用 LLM 解析每个分块
+	cfg := config.Get()
+	maxConcurrency := cfg.TextSplit.MaxConcurrency
+	if maxConcurrency <= 0 {
+		maxConcurrency = 5 // 默认值
+	}
+
+	// 使用 channel 作为信号量控制并发数
+	sem := make(chan struct{}, maxConcurrency)
+
+	var allRates []llm.FreightRate
+	var parseErrors []error
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var totalLLMMs int64
+
+	for i, chunk := range chunks {
+		if !chunk.HasPricing {
+			if h.logger != nil {
+				h.logger.Info("[agent] chunk %d skipped (no pricing)", i+1)
+			}
+			continue
+		}
+
+		wg.Add(1)
+		sem <- struct{}{} // 获取信号量（如果满了会阻塞）
+
+		go func(idx int, chunkText string) {
+			defer wg.Done()
+			defer func() { <-sem }() // 释放信号量
+
+			llmStart := time.Now()
+			rates, err := h.llmService.ParseQuoteInput(ctx, chunkText)
+			llmMs := time.Since(llmStart).Milliseconds()
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			totalLLMMs += llmMs
+
+			if err != nil {
+				parseErrors = append(parseErrors, fmt.Errorf("chunk %d: %w", idx+1, err))
+				if h.logger != nil {
+					h.logger.Error("[agent] chunk %d LLM error: %v", idx+1, err)
+				}
+			} else {
+				allRates = append(allRates, rates...)
+				if h.logger != nil {
+					h.logger.Info("[agent] chunk %d parsed: %d rates, %dms", idx+1, len(rates), llmMs)
+				}
+			}
+		}(i, chunk.Content)
+	}
+
+	wg.Wait()
+
+	// 统计 LLM 调用结果
+	if len(parseErrors) > 0 {
 		taskStatus = store.TaskStatusFailed
 		h.taskStore.AddStep(ctx, &store.TaskStepRecord{
 			TaskID:     taskID,
 			StepType:   store.StepTypeParse,
 			Status:     store.StepStatusFailed,
-			Summary:    fmt.Sprintf("LLM 解析失败，耗时 %dms", llmMs),
-			Error:      err.Error(),
-			DurationMS: store.Int64Ptr(llmMs),
+			Summary:    fmt.Sprintf("解析失败，%d/%d 个分块出错，平均耗时 %dms", len(parseErrors), len(chunks), totalLLMMs/int64(len(chunks))),
+			Error:      fmt.Sprintf("%v", parseErrors[0]),
+			DurationMS: store.Int64Ptr(totalLLMMs),
 		})
-		if h.logger != nil {
-			h.logger.Error("[agent] LLM parse error: %v", err)
-		} else {
-			log.Printf("[agent] parse quote error: %v", err)
-		}
-		// 检查是否为第三方API错误，如果是则返回友好提示
-		userErrMsg := formatLLMErrorForUser(err)
+		userErrMsg := formatLLMErrorForUser(parseErrors[0])
 		return userErrMsg
 	}
 
+	if h.logger != nil {
+		h.logger.Info("[agent] LLM parse completed: total_chunks=%d total_rates=%d", len(chunks), len(allRates))
+	}
+
 	// 记录模型输出的 JSON
-	if modelJSON, err := json.Marshal(rates); err == nil {
+	if modelJSON, err := json.Marshal(allRates); err == nil {
 		task.ModelOutputJSON = string(modelJSON)
 	}
 
@@ -202,19 +256,19 @@ func (h *FreightAgentHandler) Handle(ctx context.Context, userID, chatID, text s
 		TaskID:     taskID,
 		StepType:   store.StepTypeParse,
 		Status:     store.StepStatusSuccess,
-		Summary:    fmt.Sprintf("解析到 %d 条运价，耗时 %dms", len(rates), llmMs),
-		DurationMS: store.Int64Ptr(llmMs),
+		Summary:    fmt.Sprintf("解析到 %d 条运价，耗时 %dms", len(allRates), totalLLMMs),
+		DurationMS: store.Int64Ptr(totalLLMMs),
 	})
-	if len(rates) == 0 {
+	if len(allRates) == 0 {
 		return "未能从您的输入中提取到运价信息。\n\n请提供包含起运港、目的港、运价的运价文本。"
 	}
 
 	// ③ 字段校验
-	valid, invalid := filterValidRates(rates)
+	valid, invalid := filterValidRates(allRates)
 	if h.logger != nil {
-		h.logger.Info("[agent] validation: total=%d valid=%d invalid=%d", len(rates), len(valid), len(invalid))
+		h.logger.Info("[agent] validation: total=%d valid=%d invalid=%d", len(allRates), len(valid), len(invalid))
 	} else {
-		log.Printf("[agent] rates total=%d valid=%d invalid=%d", len(rates), len(valid), len(invalid))
+		log.Printf("[agent] rates total=%d valid=%d invalid=%d", len(allRates), len(valid), len(invalid))
 	}
 	if len(valid) == 0 {
 		return buildInvalidOnlyReply(invalid)
@@ -431,6 +485,9 @@ func buildRateTableReply(rates []llm.FreightRate, invalid []llm.FreightRate, pus
 		groups[k] = append(groups[k], r)
 	}
 
+	// 构建推送状态映射（用于在表格中显示每条数据的状态）
+	pushStatusMap := buildPushStatusMap(rates, pushResult)
+
 	for gi, key := range order {
 		group := groups[key]
 		if gi > 0 {
@@ -485,7 +542,7 @@ func buildRateTableReply(rates []llm.FreightRate, invalid []llm.FreightRate, pus
 		sb.WriteString("|---|\n")
 
 		// 数据行
-		for _, r := range group {
+		for idx, r := range group {
 			pod := r.POD
 			if pod == "" {
 				pod = "-"
@@ -500,8 +557,10 @@ func buildRateTableReply(rates []llm.FreightRate, invalid []llm.FreightRate, pus
 				}
 				sb.WriteString(" | " + v)
 			}
-			// 推送状态列（默认为空，因为这是实时展示，还没推送）
-			sb.WriteString(" | - |\n")
+			// 推送状态列
+			globalIdx := getGlobalIndex(rates, group, idx)
+			status := pushStatusMap[globalIdx]
+			sb.WriteString(" | " + status + " |\n")
 		}
 	}
 
@@ -665,4 +724,72 @@ func formatLLMErrorForUser(err error) string {
 
 	// 其他错误返回原始信息
 	return fmt.Sprintf("运价解析失败：%v\n\n请检查格式后重试。", err)
+}
+
+// buildPushStatusMap 构建推送状态映射（globalIndex -> 状态文本）
+func buildPushStatusMap(rates []llm.FreightRate, pushResult *push.PushResult) map[int]string {
+	statusMap := make(map[int]string)
+
+	if pushResult == nil {
+		// 没有推送结果，全部显示为"-"
+		for i := range rates {
+			statusMap[i] = "-"
+		}
+		return statusMap
+	}
+
+	// 初始化所有状态为"-"
+	for i := range rates {
+		statusMap[i] = "-"
+	}
+
+	// 标记成功的记录
+	for _, idx := range pushResult.SuccessIndices {
+		if idx < len(rates) {
+			statusMap[idx] = "✅"
+		}
+	}
+
+	// 标记失败的记录
+	for _, idx := range pushResult.FailedIndices {
+		if idx < len(rates) {
+			statusMap[idx] = "❌"
+		}
+	}
+
+	// 标记跳过的记录（缺少必填字段）
+	// 跳过的记录是那些不在 SuccessIndices 和 FailedIndices 中的
+	successSet := make(map[int]bool)
+	for _, idx := range pushResult.SuccessIndices {
+		successSet[idx] = true
+	}
+	failedSet := make(map[int]bool)
+	for _, idx := range pushResult.FailedIndices {
+		failedSet[idx] = true
+	}
+
+	for i := range rates {
+		if !successSet[i] && !failedSet[i] {
+			statusMap[i] = "⏭️" // 跳过
+		}
+	}
+
+	return statusMap
+}
+
+// getGlobalIndex 获取某条记录在 rates 数组中的全局索引
+func getGlobalIndex(rates []llm.FreightRate, group []llm.FreightRate, groupIdx int) int {
+	targetRate := group[groupIdx]
+	for i, r := range rates {
+		// 通过比较关键字段来匹配
+		if r.POL == targetRate.POL &&
+			r.POD == targetRate.POD &&
+			r.Carrier == targetRate.Carrier &&
+			r.F20GP == targetRate.F20GP &&
+			r.F40GP == targetRate.F40GP &&
+			r.F40HC == targetRate.F40HC {
+			return i
+		}
+	}
+	return -1
 }

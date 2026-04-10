@@ -35,3 +35,18 @@ wechat:
   encoding_aes_key: ""
   bot_id: "your_bot_id"
   bot_secret: "your_bot_secret"
+
+push:
+  enabled: true
+  base_url: "https://your-api.com"
+  client_id: "your_client_id"
+  client_secret: "your_client_secret"
+  token_ttl: 60000
+  timeout: 30
+  max_retries: 3
+
+text_split:
+  min_chunk_size: 800   # 低于此字数不分块
+  max_chunk_size: 1200  # 超过此字数强制分割
+  max_concurrency: 5    # LLM 最大并发数（防止超过 QPS 限制）
+  max_chunks: 20        # 最大分块数量（超过则合并）
