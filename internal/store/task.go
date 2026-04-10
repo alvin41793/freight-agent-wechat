@@ -11,13 +11,12 @@ import (
 	"gorm.io/gorm"
 )
 
-// ── 步骤名常量 ──────────────────────────────────────────────────────────────
+// ── 步骤类型常量 ──────────────────────────────────────────────────────────────
 
 const (
-	StepIntentCheck = "intent_check" // 意图识别（规则判断）
-	StepLLMParse    = "llm_parse"    // LLM 运价提取
-	StepValidate    = "validate"     // 字段校验（有效/无效计数）
-	StepDBSave      = "db_save"      // 写入数据库
+	StepTypeParse = "parse" // LLM 解析
+	StepTypeSave  = "save"  // 保存到数据库
+	StepTypePush  = "push"  // 推送到第三方
 )
 
 // ── 状态常量 ────────────────────────────────────────────────────────────────
@@ -31,32 +30,36 @@ const (
 	StepStatusSuccess = "success"
 	StepStatusFailed  = "failed"
 	StepStatusSkipped = "skipped"
+	StepStatusPartial = "partial" // 部分成功
 )
 
 // ── GORM 模型 ────────────────────────────────────────────────────────────────
 
 // TaskRecord 对应 tasks 表
 type TaskRecord struct {
-	ID              string     `gorm:"primaryKey;type:varchar(36)"`
-	UserID          string     `gorm:"column:user_id;size:64;not null"`
-	ChatID          string     `gorm:"column:chat_id;size:64"`
-	RawText         string     `gorm:"column:raw_text;type:text;not null"`
-	Status          string     `gorm:"column:status;size:16;not null;default:pending"`
-	TotalDurationMS *int64     `gorm:"column:total_duration_ms"`
-	CreatedAt       time.Time  `gorm:"column:created_at;autoCreateTime"`
-	CompletedAt     *time.Time `gorm:"column:completed_at"`
+	ID               string     `gorm:"primaryKey;type:varchar(36)"`
+	UserID           string     `gorm:"column:user_id;size:64;not null"`
+	ChatID           string     `gorm:"column:chat_id;size:64"`
+	RawText          string     `gorm:"column:raw_text;type:text;not null"`  // 用户输入文本
+	ModelOutputJSON  string     `gorm:"column:model_output_json;type:text"`  // 模型提取的 JSON
+	SavedDataJSON    string     `gorm:"column:saved_data_json;type:text"`    // 保存到数据库的数据 JSON
+	PushRequestJSON  string     `gorm:"column:push_request_json;type:text"`  // 推送接口发送的请求参数 JSON
+	PushResponseJSON string     `gorm:"column:push_response_json;type:text"` // 推送接口返回的 JSON
+	Status           string     `gorm:"column:status;size:16;not null;default:pending"`
+	TotalDurationMS  *int64     `gorm:"column:total_duration_ms"`
+	CreatedAt        time.Time  `gorm:"column:created_at;autoCreateTime"`
+	CompletedAt      *time.Time `gorm:"column:completed_at"`
 }
 
 func (TaskRecord) TableName() string { return "tasks" }
 
-// TaskStepRecord 对应 task_steps 表
+// TaskStepRecord 对应 task_steps 表，只记录主流程关键步骤
 type TaskStepRecord struct {
 	ID         uint64    `gorm:"primaryKey;autoIncrement"`
 	TaskID     string    `gorm:"column:task_id;not null;type:varchar(36)"`
-	Step       string    `gorm:"column:step;size:64;not null"`
+	StepType   string    `gorm:"column:step_type;size:64;not null"` // 步骤类型：parse/save/push
 	Status     string    `gorm:"column:status;size:16;not null"`
-	Input      string    `gorm:"column:input;type:text"`
-	Output     string    `gorm:"column:output;type:text"`
+	Summary    string    `gorm:"column:summary;type:text"` // 步骤摘要
 	DurationMS *int64    `gorm:"column:duration_ms"`
 	Error      string    `gorm:"column:error;type:text"`
 	CreatedAt  time.Time `gorm:"column:created_at;autoCreateTime"`
@@ -87,7 +90,7 @@ func (s *TaskStore) Create(ctx context.Context, task *TaskRecord) error {
 // AddStep 写入一条步骤记录，失败时仅记录日志不返回 error（不阻塞主流程）
 func (s *TaskStore) AddStep(ctx context.Context, step *TaskStepRecord) {
 	if err := s.db.WithContext(ctx).Create(step).Error; err != nil {
-		log.Printf("[task] add step %q error: %v", step.Step, err)
+		log.Printf("[task] add step %q error: %v", step.StepType, err)
 	}
 }
 
@@ -103,6 +106,21 @@ func (s *TaskStore) Complete(ctx context.Context, taskID, status string, totalMS
 		}).Error; err != nil {
 		log.Printf("[task] complete task %s error: %v", taskID, err)
 	}
+}
+
+// UpdateTaskData 更新任务的关键数据字段（模型输出、保存数据、推送响应）
+func (s *TaskStore) UpdateTaskData(ctx context.Context, taskID, modelOutputJSON, savedDataJSON, pushRequestJSON, pushResponseJSON string) error {
+	if err := s.db.WithContext(ctx).Model(&TaskRecord{}).
+		Where("id = ?", taskID).
+		Updates(map[string]interface{}{
+			"model_output_json":  modelOutputJSON,
+			"saved_data_json":    savedDataJSON,
+			"push_request_json":  pushRequestJSON,
+			"push_response_json": pushResponseJSON,
+		}).Error; err != nil {
+		return fmt.Errorf("update task data: %w", err)
+	}
+	return nil
 }
 
 // ── 辅助函数 ─────────────────────────────────────────────────────────────────

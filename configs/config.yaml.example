@@ -35,3 +35,13 @@ wechat:
   encoding_aes_key: ""
   bot_id: "your_bot_id"
   bot_secret: "your_bot_secret"
+
+push:
+  enabled: false
+  base_url: "https://dev-openapi.geekyum.com"  # 测试环境
+  # base_url: "https://openapi.geekyum.com"    # 生产环境
+  client_id: "your_client_id"
+  client_secret: "your_client_secret"
+  token_ttl: 60000
+  timeout: 30
+  max_retries: 3

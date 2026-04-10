@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"freight-agent-wechat/internal/llm"
+	"freight-agent-wechat/internal/push"
 	"freight-agent-wechat/internal/session"
 	"freight-agent-wechat/internal/store"
 	"freight-agent-wechat/pkg/logger"
@@ -84,6 +86,8 @@ type FreightAgentHandler struct {
 	rateStore    *store.FreightRateStore
 	taskStore    *store.TaskStore
 	pendingStore *session.PendingStore
+	pushService  *push.PushService
+	logger       *logger.Logger
 }
 
 // NewFreightAgentHandler 创建运价 Agent 处理器
@@ -92,13 +96,21 @@ func NewFreightAgentHandler(
 	rateStore *store.FreightRateStore,
 	taskStore *store.TaskStore,
 	pendingStore *session.PendingStore,
+	pushSvc *push.PushService,
 ) *FreightAgentHandler {
 	return &FreightAgentHandler{
 		llmService:   llmSvc,
 		rateStore:    rateStore,
 		taskStore:    taskStore,
 		pendingStore: pendingStore,
+		pushService:  pushSvc,
 	}
+}
+
+// WithLogger 设置日志记录器
+func (h *FreightAgentHandler) WithLogger(l *logger.Logger) *FreightAgentHandler {
+	h.logger = l
+	return h
 }
 
 // Handle 实现 bot.MessageHandler 接口，处理用户消息
@@ -108,7 +120,11 @@ func (h *FreightAgentHandler) Handle(ctx context.Context, userID, chatID, text s
 	}
 	text = normalizeText(text)
 
-	log.Printf("[agent] user=%s chat=%s text=%q", userID, chatID, text)
+	if h.logger != nil {
+		h.logger.Info("[agent] received message: user=%s chat=%s", userID, chatID)
+	} else {
+		log.Printf("[agent] user=%s chat=%s text=%q", userID, chatID, text)
+	}
 
 	// 将用户/会话信息写入 context，供 LLM 服务 debug 日志使用
 	ctx = context.WithValue(ctx, logger.ContextKeyUserID, userID)
@@ -126,7 +142,11 @@ func (h *FreightAgentHandler) Handle(ctx context.Context, userID, chatID, text s
 		Status:  store.TaskStatusPending,
 	}
 	if err := h.taskStore.Create(ctx, task); err != nil {
-		log.Printf("[agent] create task error: %v", err)
+		if h.logger != nil {
+			h.logger.Error("[agent] create task error: %v", err)
+		} else {
+			log.Printf("[agent] create task error: %v", err)
+		}
 	}
 	defer func() {
 		h.taskStore.Complete(ctx, taskID, taskStatus, time.Since(taskStart).Milliseconds())
@@ -134,22 +154,13 @@ func (h *FreightAgentHandler) Handle(ctx context.Context, userID, chatID, text s
 
 	// ① 意图预判断：输入是否运价相关
 	isFreight := isLikelyFreightInput(text)
-	intentStatus := store.StepStatusSuccess
-	intentOutput := "pass"
-	if !isFreight {
-		intentStatus = store.StepStatusSkipped
-		intentOutput = "reject"
-	}
-	h.taskStore.AddStep(ctx, &store.TaskStepRecord{
-		TaskID: taskID,
-		Step:   store.StepIntentCheck,
-		Status: intentStatus,
-		Input:  store.TruncateText(text, 200),
-		Output: intentOutput,
-	})
 	if !isFreight {
 		taskStatus = store.TaskStatusRejected
-		log.Printf("[agent] non-freight input, skip parsing")
+		if h.logger != nil {
+			h.logger.Info("[agent] non-freight input, skip parsing")
+		} else {
+			log.Printf("[agent] non-freight input, skip parsing")
+		}
 		return "我是运价分析机器人，可以帮您从运价报价文本中提取结构化数据。\n\n请发送包含以下信息的运价文本：\n• 船公司名称（如万海、MSC、COSCO）\n• 起运港 / 目的港\n• 箱型价格（20GP / 40GP / 40HC）\n• 有效期"
 	}
 
@@ -157,26 +168,41 @@ func (h *FreightAgentHandler) Handle(ctx context.Context, userID, chatID, text s
 	llmStart := time.Now()
 	rates, err := h.llmService.ParseQuoteInput(ctx, text)
 	llmMs := time.Since(llmStart).Milliseconds()
-	log.Printf("[agent] ParseQuoteInput elapsed=%s", time.Since(llmStart).Round(time.Millisecond))
+	if h.logger != nil {
+		h.logger.Info("[agent] LLM parse completed: elapsed=%dms rates=%d", llmMs, len(rates))
+	} else {
+		log.Printf("[agent] ParseQuoteInput elapsed=%s", time.Since(llmStart).Round(time.Millisecond))
+	}
 	if err != nil {
 		taskStatus = store.TaskStatusFailed
 		h.taskStore.AddStep(ctx, &store.TaskStepRecord{
 			TaskID:     taskID,
-			Step:       store.StepLLMParse,
+			StepType:   store.StepTypeParse,
 			Status:     store.StepStatusFailed,
-			Input:      store.TruncateText(text, 500),
+			Summary:    fmt.Sprintf("LLM 解析失败，耗时 %dms", llmMs),
 			Error:      err.Error(),
 			DurationMS: store.Int64Ptr(llmMs),
 		})
-		log.Printf("[agent] parse quote error: %v", err)
-		return fmt.Sprintf("运价解析失败：%v\n\n请检查格式后重试。", err)
+		if h.logger != nil {
+			h.logger.Error("[agent] LLM parse error: %v", err)
+		} else {
+			log.Printf("[agent] parse quote error: %v", err)
+		}
+		// 检查是否为第三方API错误，如果是则返回友好提示
+		userErrMsg := formatLLMErrorForUser(err)
+		return userErrMsg
 	}
+
+	// 记录模型输出的 JSON
+	if modelJSON, err := json.Marshal(rates); err == nil {
+		task.ModelOutputJSON = string(modelJSON)
+	}
+
 	h.taskStore.AddStep(ctx, &store.TaskStepRecord{
 		TaskID:     taskID,
-		Step:       store.StepLLMParse,
+		StepType:   store.StepTypeParse,
 		Status:     store.StepStatusSuccess,
-		Input:      store.TruncateText(text, 500),
-		Output:     fmt.Sprintf("解析到 %d 条运价", len(rates)),
+		Summary:    fmt.Sprintf("解析到 %d 条运价，耗时 %dms", len(rates), llmMs),
 		DurationMS: store.Int64Ptr(llmMs),
 	})
 	if len(rates) == 0 {
@@ -185,45 +211,146 @@ func (h *FreightAgentHandler) Handle(ctx context.Context, userID, chatID, text s
 
 	// ③ 字段校验
 	valid, invalid := filterValidRates(rates)
-	log.Printf("[agent] rates total=%d valid=%d invalid=%d", len(rates), len(valid), len(invalid))
-	h.taskStore.AddStep(ctx, &store.TaskStepRecord{
-		TaskID: taskID,
-		Step:   store.StepValidate,
-		Status: store.StepStatusSuccess,
-		Input:  fmt.Sprintf("解析到 %d 条", len(rates)),
-		Output: fmt.Sprintf("有效 %d 条，无效 %d 条", len(valid), len(invalid)),
-	})
+	if h.logger != nil {
+		h.logger.Info("[agent] validation: total=%d valid=%d invalid=%d", len(rates), len(valid), len(invalid))
+	} else {
+		log.Printf("[agent] rates total=%d valid=%d invalid=%d", len(rates), len(valid), len(invalid))
+	}
 	if len(valid) == 0 {
 		return buildInvalidOnlyReply(invalid)
 	}
 
 	// ④ 保存有效运价
 	saveStart := time.Now()
-	saveErr := h.rateStore.BatchSave(ctx, valid, userID, chatID)
+	savedIDs, saveErr := h.rateStore.BatchSave(ctx, valid, userID, chatID)
 	saveMs := time.Since(saveStart).Milliseconds()
 	if saveErr != nil {
 		taskStatus = store.TaskStatusFailed
 		h.taskStore.AddStep(ctx, &store.TaskStepRecord{
 			TaskID:     taskID,
-			Step:       store.StepDBSave,
+			StepType:   store.StepTypeSave,
 			Status:     store.StepStatusFailed,
-			Input:      fmt.Sprintf("%d 条有效运价", len(valid)),
+			Summary:    fmt.Sprintf("保存 %d 条运价失败，耗时 %dms", len(valid), saveMs),
 			Error:      saveErr.Error(),
 			DurationMS: store.Int64Ptr(saveMs),
 		})
-		log.Printf("[agent] save rates error: %v", saveErr)
+		if h.logger != nil {
+			h.logger.Error("[agent] save rates error: %v", saveErr)
+		} else {
+			log.Printf("[agent] save rates error: %v", saveErr)
+		}
 		return fmt.Sprintf("⚠️ 运价保存失败：%v", saveErr)
 	}
+
+	// 记录保存到数据库的数据 JSON
+	if savedJSON, err := json.Marshal(valid); err == nil {
+		task.SavedDataJSON = string(savedJSON)
+	}
+
 	h.taskStore.AddStep(ctx, &store.TaskStepRecord{
 		TaskID:     taskID,
-		Step:       store.StepDBSave,
+		StepType:   store.StepTypeSave,
 		Status:     store.StepStatusSuccess,
-		Input:      fmt.Sprintf("%d 条有效运价", len(valid)),
-		Output:     fmt.Sprintf("已保存 %d 条", len(valid)),
+		Summary:    fmt.Sprintf("成功保存 %d 条运价，耗时 %dms", len(valid), saveMs),
 		DurationMS: store.Int64Ptr(saveMs),
 	})
 
-	return buildRateTableReply(valid, invalid)
+	// ⑤ 推送到第三方(如果启用)
+	var pushResult *push.PushResult
+	if h.pushService != nil && h.pushService.IsEnabled() {
+		pushStart := time.Now()
+		result := h.pushService.PushRates(ctx, valid)
+		pushMs := time.Since(pushStart).Milliseconds()
+		pushResult = &result
+		if h.logger != nil {
+			h.logger.Info("[agent] push completed: total=%d success=%d failed=%d skipped=%d elapsed=%dms",
+				result.Total, result.Success, result.Failed, result.Skipped, pushMs)
+		} else {
+			log.Printf("[agent] push rates: total=%d success=%d failed=%d skipped=%d elapsed=%s",
+				result.Total, result.Success, result.Failed, result.Skipped,
+				time.Since(pushStart).Round(time.Millisecond))
+		}
+
+		// 更新推送状态
+		if len(savedIDs) > 0 {
+			// 根据推送结果中的索引，分别更新成功和失败的记录
+			var successIDs []uint64
+			var failedIDs []uint64
+
+			// 构建成功和失败的 ID 列表
+			for _, idx := range result.SuccessIndices {
+				if idx < len(savedIDs) {
+					successIDs = append(successIDs, savedIDs[idx])
+				}
+			}
+			for _, idx := range result.FailedIndices {
+				if idx < len(savedIDs) {
+					failedIDs = append(failedIDs, savedIDs[idx])
+				}
+			}
+
+			// 构建错误信息
+			errorMsg := ""
+			if len(result.Failures) > 0 {
+				// 提取第一条失败记录的错误信息
+				errorMsg = result.Failures[0].Error
+			}
+
+			// 更新数据库状态
+			if err := h.rateStore.UpdatePushStatus(ctx, successIDs, failedIDs, errorMsg); err != nil {
+				if h.logger != nil {
+					h.logger.Error("[agent] update push status error: %v", err)
+				} else {
+					log.Printf("[agent] update push status error: %v", err)
+				}
+			}
+		}
+
+		// 记录推送请求和响应 JSON（保存第三方API的原始请求和响应）
+		if pushResult.RawAPIRequest != "" {
+			task.PushRequestJSON = pushResult.RawAPIRequest
+		}
+		if pushResult.RawAPIResponse != "" {
+			task.PushResponseJSON = pushResult.RawAPIResponse
+		} else {
+			// 如果没有原始API响应，则保存内部统计信息
+			pushResponse := map[string]interface{}{
+				"total":    result.Total,
+				"success":  result.Success,
+				"failed":   result.Failed,
+				"skipped":  result.Skipped,
+				"failures": result.Failures,
+			}
+			if pushRespJSON, err := json.Marshal(pushResponse); err == nil {
+				task.PushResponseJSON = string(pushRespJSON)
+			}
+		}
+
+		h.taskStore.AddStep(ctx, &store.TaskStepRecord{
+			TaskID:   taskID,
+			StepType: store.StepTypePush,
+			Status: func() string {
+				if result.Failed == 0 && result.Skipped == 0 {
+					return store.StepStatusSuccess
+				}
+				if result.Success == 0 {
+					return store.StepStatusFailed
+				}
+				return store.StepStatusPartial
+			}(),
+			Summary:    fmt.Sprintf("推送完成：成功 %d, 失败 %d, 跳过 %d，耗时 %dms", result.Success, result.Failed, result.Skipped, pushMs),
+			DurationMS: store.Int64Ptr(pushMs),
+		})
+	}
+
+	// 更新任务记录中的关键字段
+	if err := h.taskStore.UpdateTaskData(ctx, taskID, task.ModelOutputJSON, task.SavedDataJSON, task.PushRequestJSON, task.PushResponseJSON); err != nil {
+		if h.logger != nil {
+			h.logger.Error("[agent] update task data error: %v", err)
+		}
+	}
+
+	return buildRateTableReply(valid, invalid, pushResult)
 }
 
 // colDef 定义表格列的展示名称和取值方式
@@ -270,18 +397,34 @@ var rateColumns = []colDef{
 	}},
 }
 
-// buildRateTableReply 构建运价列表回复，按船公司+起运港分组，每组输出一个 Markdown 表格。
+// buildRateTableReply 构建运价列表回复，按 Agent+Carrier+POL 分组，每组输出一个 Markdown 表格。
 // 列动态根据实际提取到的字段决定，没有内容的列不展示。
-func buildRateTableReply(rates []llm.FreightRate, invalid []llm.FreightRate) string {
+func buildRateTableReply(rates []llm.FreightRate, invalid []llm.FreightRate, pushResult *push.PushResult) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("✅ 已保存 %d 条运价\n", len(rates)))
 
-	// 按 Carrier+POL 分组，保留插入顺序
-	type groupKey struct{ Carrier, POL string }
+	// 推送结果（如果有）
+	if pushResult != nil && (pushResult.Success > 0 || pushResult.Failed > 0) {
+		sb.WriteString(fmt.Sprintf("📤 推送结果: 成功 %d 条, 失败 %d 条", pushResult.Success, pushResult.Failed))
+		if pushResult.Skipped > 0 {
+			sb.WriteString(fmt.Sprintf(", 跳过 %d 条(缺少必填字段)", pushResult.Skipped))
+		}
+		sb.WriteString("\n")
+
+		// 如果有失败,显示详细错误（只取 msg 字段）
+		if len(pushResult.Failures) > 0 {
+			// 提取第一条失败的错误信息中的 msg 部分
+			errorMsg := extractPushErrorMsg(pushResult.Failures[0].Error)
+			sb.WriteString(fmt.Sprintf("❌ %s\n", errorMsg))
+		}
+		sb.WriteString("\n")
+	}
+
+	// 按 Agent+Carrier+POL 分组，保留插入顺序
+	type groupKey struct{ Agent, Carrier, POL string }
 	var order []groupKey
 	groups := map[groupKey][]llm.FreightRate{}
 	for _, r := range rates {
-		k := groupKey{r.Carrier, r.POL}
+		k := groupKey{r.Agent, r.Carrier, r.POL}
 		if _, ok := groups[k]; !ok {
 			order = append(order, k)
 		}
@@ -294,11 +437,17 @@ func buildRateTableReply(rates []llm.FreightRate, invalid []llm.FreightRate) str
 			sb.WriteString("\n")
 		}
 
-		// 组标题：Carrier | POL(POLCode)
+		// 组标题：Agent（如果有）+ Carrier | POL(POLCode)
+		var titleParts []string
+		if key.Agent != "" {
+			titleParts = append(titleParts, key.Agent)
+		}
 		carrier := key.Carrier
 		if carrier == "" {
 			carrier = "未知船公司"
 		}
+		titleParts = append(titleParts, carrier)
+
 		pol := key.POL
 		if pol == "" {
 			pol = "未知起运港"
@@ -306,7 +455,9 @@ func buildRateTableReply(rates []llm.FreightRate, invalid []llm.FreightRate) str
 		if polCode := group[0].POLCode; polCode != "" {
 			pol = pol + "(" + polCode + ")"
 		}
-		sb.WriteString(fmt.Sprintf("\n**%s | %s**\n", carrier, pol))
+		titleParts = append(titleParts, pol)
+
+		sb.WriteString(fmt.Sprintf("\n**%s**\n\n", strings.Join(titleParts, " | ")))
 
 		// 扫描该组有实际数据的列
 		var activeCols []colDef
@@ -319,19 +470,19 @@ func buildRateTableReply(rates []llm.FreightRate, invalid []llm.FreightRate) str
 			}
 		}
 
-		// 表头
+		// 表头：目的港 + 动态列 + 推送状态
 		sb.WriteString("| 目的港")
 		for _, col := range activeCols {
 			sb.WriteString(" | " + col.header)
 		}
-		sb.WriteString(" |\n")
+		sb.WriteString(" | 推送状态 |\n")
 
 		// 分隔行
 		sb.WriteString("|---")
 		for range activeCols {
 			sb.WriteString("|---")
 		}
-		sb.WriteString("|\n")
+		sb.WriteString("|---|\n")
 
 		// 数据行
 		for _, r := range group {
@@ -349,7 +500,8 @@ func buildRateTableReply(rates []llm.FreightRate, invalid []llm.FreightRate) str
 				}
 				sb.WriteString(" | " + v)
 			}
-			sb.WriteString(" |\n")
+			// 推送状态列（默认为空，因为这是实时展示，还没推送）
+			sb.WriteString(" | - |\n")
 		}
 	}
 
@@ -381,7 +533,7 @@ func filterValidRates(rates []llm.FreightRate) (valid, invalid []llm.FreightRate
 			invalid = append(invalid, r)
 		case r.POD == "":
 			invalid = append(invalid, r)
-		case r.ValidityStartTime == "" && r.ValidityEndTime == "":
+		case r.ValidityStartTime == "" || r.ValidityEndTime == "":
 			invalid = append(invalid, r)
 		case !hasValidPrice(r):
 			invalid = append(invalid, r)
@@ -452,4 +604,65 @@ func buildPriceStr(r llm.FreightRate) string {
 		parts = append(parts, "40HC: "+r.F40HC)
 	}
 	return strings.Join(parts, " / ")
+}
+
+// extractPushErrorMsg 从推送错误信息中提取 msg 字段
+// 错误信息格式："api error: code=50000, msg=批量新增异常 第1条数据：..."
+// 如果 msg 为空，返回“未知错误”
+func extractPushErrorMsg(errMsg string) string {
+	if errMsg == "" {
+		return "未知错误"
+	}
+
+	// 尝试提取 msg= 后面的内容
+	if idx := strings.Index(errMsg, "msg="); idx != -1 {
+		msg := errMsg[idx+4:]
+		if msg == "" {
+			return "未知错误"
+		}
+		return msg
+	}
+
+	// 如果没有 msg= 前缀，直接返回原错误信息
+	if errMsg == "" {
+		return "未知错误"
+	}
+	return errMsg
+}
+
+// formatLLMErrorForUser 将LLM错误格式化为用户友好的错误消息
+// 如果是第三方API错误（如网络超时、认证失败等），返回通用提示
+// 否则返回原始错误信息
+func formatLLMErrorForUser(err error) string {
+	if err == nil {
+		return "运价解析失败\n\n请检查格式后重试。"
+	}
+
+	errMsg := err.Error()
+	errLower := strings.ToLower(errMsg)
+
+	// 检测是否为第三方API相关错误
+	isAPIError := strings.Contains(errLower, "chat completion failed") ||
+		strings.Contains(errLower, "post") ||
+		strings.Contains(errLower, "context deadline exceeded") ||
+		strings.Contains(errLower, "connection refused") ||
+		strings.Contains(errLower, "timeout") ||
+		strings.Contains(errLower, "network") ||
+		strings.Contains(errLower, "dashscope") ||
+		strings.Contains(errLower, "aliyuncs") ||
+		strings.Contains(errLower, "openai") ||
+		strings.Contains(errLower, "api error") ||
+		strings.Contains(errLower, "401") ||
+		strings.Contains(errLower, "403") ||
+		strings.Contains(errLower, "500") ||
+		strings.Contains(errLower, "502") ||
+		strings.Contains(errLower, "503") ||
+		strings.Contains(errLower, "504")
+
+	if isAPIError {
+		return "网络问题，请稍后重试"
+	}
+
+	// 其他错误返回原始信息
+	return fmt.Sprintf("运价解析失败：%v\n\n请检查格式后重试。", err)
 }

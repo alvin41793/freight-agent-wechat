@@ -16,6 +16,7 @@ type Config struct {
 	Redis    RedisConfig    `mapstructure:"redis"`
 	LLM      LLMConfig      `mapstructure:"llm"`
 	WeChat   WeChatConfig   `mapstructure:"wechat"`
+	Push     PushConfig     `mapstructure:"push"`
 }
 
 // ServerConfig 服务器配置
@@ -66,6 +67,17 @@ type WeChatConfig struct {
 	EncodingAESKey string `mapstructure:"encoding_aes_key"`
 	BotID          string `mapstructure:"bot_id"`
 	BotSecret      string `mapstructure:"bot_secret"`
+}
+
+// PushConfig 第三方推送配置
+type PushConfig struct {
+	Enabled      bool   `mapstructure:"enabled"`       // 是否启用推送
+	BaseURL      string `mapstructure:"base_url"`      // API 基础地址
+	ClientID     string `mapstructure:"client_id"`     // OAuth client_id
+	ClientSecret string `mapstructure:"client_secret"` // OAuth client_secret
+	TokenTTL     int    `mapstructure:"token_ttl"`     // token 有效期(毫秒),默认 60000
+	Timeout      int    `mapstructure:"timeout"`       // HTTP 超时(秒),默认 30
+	MaxRetries   int    `mapstructure:"max_retries"`   // 网络错误最大重试次数,默认 3
 }
 
 // DSN 生成数据库连接字符串
@@ -127,6 +139,10 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("wechat.encoding_aes_key", "WECHAT_ENCODING_AES_KEY")
 	_ = viper.BindEnv("wechat.bot_id", "WECHAT_BOT_ID")
 	_ = viper.BindEnv("wechat.bot_secret", "WECHAT_BOT_SECRET")
+	_ = viper.BindEnv("push.enabled", "PUSH_ENABLED")
+	_ = viper.BindEnv("push.base_url", "PUSH_BASE_URL")
+	_ = viper.BindEnv("push.client_id", "PUSH_CLIENT_ID")
+	_ = viper.BindEnv("push.client_secret", "PUSH_CLIENT_SECRET")
 
 	if err := viper.ReadInConfig(); err != nil {
 		log.Printf("Warning: config file not found, using defaults and env vars: %v", err)

@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"freight-agent-wechat/internal/llm"
+	"freight-agent-wechat/pkg/logger"
 )
 
 // WebhookHandler 插件处理器
 type WebhookHandler struct {
 	llmService *llm.Service
 	httpClient *http.Client
+	logger     *logger.Logger
 }
 
 // NewWebhookHandler 创建处理器
@@ -25,6 +27,12 @@ func NewWebhookHandler(llmService *llm.Service) *WebhookHandler {
 		llmService: llmService,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// WithLogger 设置日志记录器
+func (h *WebhookHandler) WithLogger(l *logger.Logger) *WebhookHandler {
+	h.logger = l
+	return h
 }
 
 // PluginRequest 企业微信智能机器人插件请求格式
@@ -89,7 +97,9 @@ func (h *WebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	result, err := h.generateQuote(ctx, req.Query)
 	if err != nil {
 		log.Printf("Failed to generate quote: %v", err)
-		writeJSON(w, PluginResponse{Content: fmt.Sprintf("解析失败：%v", err)})
+		// 检查是否为第三方API错误，如果是则返回友好提示
+		userErrMsg := formatLLMErrorForUser(err)
+		writeJSON(w, PluginResponse{Content: userErrMsg})
 		return
 	}
 
@@ -104,7 +114,9 @@ func (h *WebhookHandler) processAsync(req PluginRequest) {
 	result, err := h.generateQuote(ctx, req.Query)
 	if err != nil {
 		log.Printf("[async] Failed to generate quote: %v", err)
-		h.sendAsyncResult(req, fmt.Sprintf("❌ 解析失败：%v", err))
+		// 检查是否为第三方API错误，如果是则返回友好提示
+		userErrMsg := formatLLMErrorForUser(err)
+		h.sendAsyncResult(req, fmt.Sprintf("❌ %s", userErrMsg))
 		return
 	}
 

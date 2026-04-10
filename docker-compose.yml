@@ -33,7 +33,7 @@ services:
     ports:
       - "3306:3306"
     environment:
-      - MYSQL_ROOT_PASSWORD=123456
+      - MYSQL_ROOT_PASSWORD=Fr3ight@2026!Secure
       - MYSQL_DATABASE=freight_agent
       - TZ=Asia/Shanghai
     volumes:

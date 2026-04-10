@@ -64,8 +64,9 @@ func StartLongConnection(cfg LongConnConfig, handler MessageHandler) {
 		// 生成本次回复的流式 ID，整个过程共用同一个 ID
 		streamID := wecomaibot.GenerateReqID("stream")
 
-		// 立即发送静态占位符（finish:false），不再地抨动畫以减少重绘
-		if _, err := client.ReplyStreamByID(msg, streamID, "正在分析运价信息，请稍候...", false, nil, nil); err != nil {
+		// 立即发送静态占位符（finish:false），使用多行占位减少长度差异，降低重排抖动
+		placeholder := "AI正在解析中..."
+		if _, err := client.ReplyStreamByID(msg, streamID, placeholder, false, nil, nil); err != nil {
 			log.Printf("[longconn] stream start error: %v", err)
 		}
 

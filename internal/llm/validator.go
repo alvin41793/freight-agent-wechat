@@ -23,6 +23,9 @@ func ValidateRates(rates []FreightRate) (valid []FreightRate, incomplete map[int
 		if r.ValidityEndTime == "" {
 			missing = append(missing, "ValidityEndTime（有效期结束日期）")
 		}
+		if r.ETD == "" {
+			missing = append(missing, "ETD（船期）")
+		}
 
 		if len(missing) == 0 {
 			valid = append(valid, r)
